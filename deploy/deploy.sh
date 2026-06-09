@@ -26,5 +26,10 @@ id bgpwatch &>/dev/null || useradd --system --home "$APP_DIR" --shell /usr/sbin/
 install -m 644 "$APP_DIR/deploy/bgpwatch.service" /etc/systemd/system/bgpwatch.service
 chown -R bgpwatch:bgpwatch "$APP_DIR"
 systemctl daemon-reload
-echo "Готово. Создай $APP_DIR/.env (chmod 600), затем: systemctl enable --now bgpwatch"
+if systemctl is-active --quiet bgpwatch; then
+    systemctl restart bgpwatch
+    echo "Готово. Сервис перезапущен — подхватил новый код."
+else
+    echo "Готово. Создай $APP_DIR/.env (chmod 600), затем: systemctl enable --now bgpwatch"
+fi
 REMOTE_EOF
