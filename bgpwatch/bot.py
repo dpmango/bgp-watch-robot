@@ -14,7 +14,7 @@ log = logging.getLogger("bgpwatch")
 
 COMMANDS = [
     {"command": "start", "description": "Запуск и приветствие"},
-    {"command": "watch", "description": "Следить за IP: /watch 1.2.3.4 [порт]"},
+    {"command": "watch", "description": "Следить: /watch 1.2.3.4 [порт] или /watch 1.2.3.0/24"},
     {"command": "unwatch", "description": "Перестать следить: /unwatch 1.2.3.4"},
     {"command": "list", "description": "Мои IP под наблюдением"},
     {"command": "status", "description": "Проверить IP сейчас: /status 1.2.3.4"},
@@ -57,6 +57,32 @@ def public_ip(s: str):
     return str(addr)
 
 
+def public_net(s: str):
+    """CIDR -> (base_ip, cidr) для публичной подсети, иначе None.
+
+    BGP-only подписка: следим за видимостью префикса, без TCP. Отсекает
+    приватные/служебные диапазоны (та же SSRF-защита, что и для хоста).
+    """
+    if "/" not in s:
+        return None
+    try:
+        net = ipaddress.ip_network(s, strict=False)
+    except ValueError:
+        return None
+    base = net.network_address
+    if (
+        base.is_private
+        or base.is_loopback
+        or base.is_link_local
+        or base.is_reserved
+        or base.is_multicast
+        or base.is_unspecified
+        or not base.is_global
+    ):
+        return None
+    return str(base), str(net)
+
+
 def parse_port(s: str):
     try:
         port = int(s)
@@ -81,6 +107,8 @@ class Bot:
         self._rl: dict = {}  # chat_id -> [timestamps] для rate-limit
 
     def _rate_ok(self, chat_id) -> bool:
+        if chat_id in config.UNLIMITED_IDS:
+            return True
         now = time.monotonic()
         window = config.RATE_LIMIT_WINDOW
         hits = [t for t in self._rl.get(chat_id, []) if now - t < window]
@@ -136,8 +164,24 @@ class Bot:
         except Exception:
             log.exception("ошибка обработки команды %s", cmd)
 
+    def _at_limit(self, chat_id, ip, port) -> bool:
+        if chat_id in config.UNLIMITED_IDS:
+            return False
+        already = any(
+            w["ip"] == ip and w["port"] == port
+            for w in self.store.list_watches(chat_id)
+        )
+        return not already and self.store.count_watches(chat_id) >= config.MAX_WATCHES_PER_CHAT
+
     async def _watch(self, chat_id, args):
-        if not args or not valid_ip(args[0]):
+        if not args:
+            await self.tg.send_message(chat_id, texts.BAD_IP)
+            return
+        # CIDR -> BGP-only подписка (port=0, без TCP)
+        if "/" in args[0]:
+            await self._watch_cidr(chat_id, args[0])
+            return
+        if not valid_ip(args[0]):
             await self.tg.send_message(chat_id, texts.BAD_IP)
             return
         ip = public_ip(args[0])
@@ -150,12 +194,7 @@ class Bot:
             if port is None:
                 await self.tg.send_message(chat_id, texts.BAD_PORT)
                 return
-        # лимит подписок на чат (не считаем повторное добавление того же target)
-        already = any(
-            w["ip"] == ip and w["port"] == port
-            for w in self.store.list_watches(chat_id)
-        )
-        if not already and self.store.count_watches(chat_id) >= config.MAX_WATCHES_PER_CHAT:
+        if self._at_limit(chat_id, ip, port):
             await self.tg.send_message(
                 chat_id, texts.limit_reached(config.MAX_WATCHES_PER_CHAT)
             )
@@ -176,12 +215,47 @@ class Bot:
             chat_id, texts.watch_added(ip, port, prefix, asn, tcp, seeing, total)
         )
 
+    async def _watch_cidr(self, chat_id, arg):
+        """BGP-only подписка на подсеть (port=0, TCP не проверяется)."""
+        net = public_net(arg)
+        if net is None:
+            await self.tg.send_message(chat_id, texts.BAD_CIDR)
+            return
+        base, cidr = net
+        if self._at_limit(chat_id, base, 0):
+            await self.tg.send_message(
+                chat_id, texts.limit_reached(config.MAX_WATCHES_PER_CHAT)
+            )
+            return
+        self.store.add_watch(chat_id, base, 0, cidr, None)
+        vis = await bgp.prefix_visibility(self.http, cidr)
+        seeing = vis.seeing if vis else None
+        total = vis.total if vis else None
+        self.store.upsert_state(
+            base, 0, cidr, None, None, seeing, total, True, int(time.time())
+        )
+        await self.tg.send_message(
+            chat_id, texts.watch_added(base, 0, cidr, None, None, seeing, total)
+        )
+
     async def _unwatch(self, chat_id, args):
-        if not args or not valid_ip(args[0]):
+        if not args:
             await self.tg.send_message(chat_id, texts.BAD_IP)
             return
-        target = texts.esc(args[0])
-        n = self.store.remove_watch(chat_id, args[0])
+        arg = args[0]
+        if "/" in arg:  # CIDR -> ключ = адрес сети
+            net = public_net(arg)
+            if net is None:
+                await self.tg.send_message(chat_id, texts.BAD_CIDR)
+                return
+            key = net[0]
+        elif valid_ip(arg):
+            key = arg
+        else:
+            await self.tg.send_message(chat_id, texts.BAD_IP)
+            return
+        target = texts.esc(arg)
+        n = self.store.remove_watch(chat_id, key)
         if n:
             await self.tg.send_message(chat_id, f"🗑 Больше не слежу за <b>{target}</b>")
         else:
@@ -206,7 +280,24 @@ class Bot:
             await self.tg.send_message(chat_id, "\n".join(chunk))
 
     async def _status(self, chat_id, args):
-        if not args or not valid_ip(args[0]):
+        if not args:
+            await self.tg.send_message(chat_id, texts.NEED_IP)
+            return
+        # CIDR -> BGP-only статус (без TCP)
+        if "/" in args[0]:
+            net = public_net(args[0])
+            if net is None:
+                await self.tg.send_message(chat_id, texts.BAD_CIDR)
+                return
+            base, cidr = net
+            vis = await bgp.prefix_visibility(self.http, cidr)
+            seeing = vis.seeing if vis else None
+            total = vis.total if vis else None
+            await self.tg.send_message(
+                chat_id, texts.status_msg(base, 0, cidr, None, None, seeing, total)
+            )
+            return
+        if not valid_ip(args[0]):
             await self.tg.send_message(chat_id, texts.NEED_IP)
             return
         ip = public_ip(args[0])

@@ -30,7 +30,8 @@ def compute_events(old, new_tcp: str, new_bgp: str):
     old_tcp = old["tcp"] if old else None
     old_bgp = _old_bgp_class(old)
 
-    if old_tcp is not None and new_tcp != old_tcp:
+    # new_tcp=None → BGP-only подписка (порт 0), TCP не проверяется
+    if new_tcp is not None and old_tcp is not None and new_tcp != old_tcp:
         events.append({"kind": "tcp", "from": old_tcp, "to": new_tcp})
 
     if new_bgp != "unknown" and old_bgp != "unknown" and new_bgp != old_bgp:
@@ -49,15 +50,19 @@ async def run_cycle(store, http_client, notify):
     if not targets:
         return 0
 
-    # 1) пробы параллельно
-    probe_targets = [(t["ip"], t["port"]) for t in targets]
-    probes = await probe.probe_many(
-        probe_targets, config.PROBE_CONCURRENCY, config.PROBE_TIMEOUT
+    # 1) пробы параллельно — только для host-подписок (port != 0).
+    #    port == 0 = BGP-only подписка (диапазон), TCP не проверяется.
+    probe_targets = [(t["ip"], t["port"]) for t in targets if t["port"] != 0]
+    probes = (
+        await probe.probe_many(
+            probe_targets, config.PROBE_CONCURRENCY, config.PROBE_TIMEOUT
+        )
+        if probe_targets
+        else {}
     )
 
-    # 2) BGP по уникальным префиксам последовательно.
-    #    Потолок на цикл, чтобы последовательный проход не растянулся за
-    #    POLL_INTERVAL и не исчерпал бюджет RIPEstat (защита от DoS).
+    # 2) BGP по уникальным префиксам, параллельно (семафор BGP_CONCURRENCY).
+    #    Потолок на цикл — защита от DoS/исчерпания бюджета RIPEstat.
     prefixes = sorted({t["prefix"] for t in targets if t["prefix"]})
     if len(prefixes) > config.MAX_PREFIXES_PER_CYCLE:
         logging.getLogger("bgpwatch").warning(
@@ -65,19 +70,21 @@ async def run_cycle(store, http_client, notify):
             len(prefixes), config.MAX_PREFIXES_PER_CYCLE, config.MAX_PREFIXES_PER_CYCLE,
         )
         prefixes = prefixes[: config.MAX_PREFIXES_PER_CYCLE]
-    prefix_set = set(prefixes)
-    vis_map = {}
-    for i, pfx in enumerate(prefixes):
-        vis_map[pfx] = await bgp.prefix_visibility(http_client, pfx)
-        if i < len(prefixes) - 1:
-            await asyncio.sleep(config.RIPE_SPACING)
+
+    sem = asyncio.Semaphore(max(1, config.BGP_CONCURRENCY))
+
+    async def _fetch(pfx):
+        async with sem:
+            return pfx, await bgp.prefix_visibility(http_client, pfx)
+
+    vis_map = dict(await asyncio.gather(*(_fetch(p) for p in prefixes)))
 
     now = int(time.time())
     total_events = 0
 
     for t in targets:
         ip, port, pfx, asn = t["ip"], t["port"], t["prefix"], t["asn"]
-        tcp = "open" if probes.get((ip, port)) else "closed"
+        tcp = None if port == 0 else ("open" if probes.get((ip, port)) else "closed")
         vis = vis_map.get(pfx)
         new_bgp = classify_bgp(vis)
 

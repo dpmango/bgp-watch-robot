@@ -65,13 +65,20 @@ PROBE_CONCURRENCY = _int("PROBE_CONCURRENCY", 100)  # макс. параллел
 BGP_UP_THRESHOLD = _float("BGP_UP_THRESHOLD", 0.5)  # доля пиров для статуса "up"
 
 RIPE_SOURCEAPP = os.environ.get("RIPE_SOURCEAPP", "bgpwatchrobot")
-RIPE_SPACING = _float("RIPE_SPACING", 1.5)          # пауза между BGP-запросами, сек
 RIPE_TIMEOUT = _float("RIPE_TIMEOUT", 25.0)         # таймаут BGP-запроса, сек
 RIPE_RETRIES = _int("RIPE_RETRIES", 3)              # ретраи при http=000/429
+
+# Параллельность BGP-запросов за цикл (RIPEstat допускает до 8 одновременных).
+BGP_CONCURRENCY = _int("BGP_CONCURRENCY", 5)
 
 # --- лимиты (защита от DoS/abuse публичного бота) ---
 MAX_WATCHES_PER_CHAT = _int("MAX_WATCHES_PER_CHAT", 50)  # макс. подписок на чат
 RATE_LIMIT_CMDS = _int("RATE_LIMIT_CMDS", 20)            # команд за окно на чат
 RATE_LIMIT_WINDOW = _float("RATE_LIMIT_WINDOW", 60.0)    # окно rate-limit, сек
-MAX_PREFIXES_PER_CYCLE = _int("MAX_PREFIXES_PER_CYCLE", 300)  # потолок BGP/цикл
+MAX_PREFIXES_PER_CYCLE = _int("MAX_PREFIXES_PER_CYCLE", 500)  # потолок BGP/цикл
 RATE_LIMIT_MAX_CHATS = _int("RATE_LIMIT_MAX_CHATS", 10000)    # порог GC dict rate-limit
+
+# chat_id без лимитов на добавление и без rate-limit (через запятую).
+UNLIMITED_IDS = {
+    int(x) for x in os.environ.get("UNLIMITED_IDS", "").replace(" ", "").split(",") if x
+}

@@ -18,20 +18,23 @@ WELCOME = (
     "<b>С чего начать:</b>\n"
     "<code>/watch 1.1.1.1</code> — добавить сервер под наблюдение\n\n"
     "<b>Все команды:</b>\n"
-    "/watch <code>&lt;ip&gt; [порт]</code> — следить (порт по умолчанию 22)\n"
-    "/unwatch <code>&lt;ip&gt;</code> — перестать следить\n"
+    "/watch <code>&lt;ip&gt; [порт]</code> — следить за хостом (порт по умолчанию 22)\n"
+    "/watch <code>&lt;ip&gt;/24</code> — следить за подсетью (только BGP, без TCP)\n"
+    "/unwatch <code>&lt;ip|подсеть&gt;</code> — перестать следить\n"
     "/list — мои серверы и их статус\n"
-    "/status <code>&lt;ip&gt;</code> — проверить прямо сейчас\n"
+    "/status <code>&lt;ip|подсеть&gt;</code> — проверить прямо сейчас\n"
     "/help — справка"
 )
 
 HELP = (
     "<b>Команды BGP Watch:</b>\n\n"
-    "/watch <code>&lt;ip&gt; [порт]</code> — добавить IP под наблюдение.\n"
+    "/watch <code>&lt;ip&gt; [порт]</code> — следить за хостом (TCP+BGP).\n"
     "   Порт по умолчанию 22. Пример: <code>/watch 1.1.1.1</code>\n"
-    "/unwatch <code>&lt;ip&gt;</code> — снять IP с наблюдения.\n"
-    "/list — список моих IP с последним статусом.\n"
-    "/status <code>&lt;ip&gt;</code> — разовая проверка прямо сейчас.\n"
+    "/watch <code>&lt;подсеть&gt;</code> — следить за диапазоном (только BGP).\n"
+    "   Пример: <code>/watch 185.157.212.0/24</code>\n"
+    "/unwatch <code>&lt;ip|подсеть&gt;</code> — снять с наблюдения.\n"
+    "/list — список с последним статусом.\n"
+    "/status <code>&lt;ip|подсеть&gt;</code> — разовая проверка прямо сейчас.\n"
     "/help — эта справка.\n\n"
     "<b>Статусы:</b>\n"
     "🟢 — хост отвечает / префикс виден\n"
@@ -47,6 +50,9 @@ EMPTY_LIST = "Список пуст. Добавь IP командой /watch <co
 PRIVATE_IP = (
     "Можно следить только за публичными IP. "
     "Приватные/служебные адреса (loopback, 10/172/192.168, 169.254, multicast) запрещены."
+)
+BAD_CIDR = (
+    "Нужна корректная публичная подсеть. Пример: <code>/watch 185.157.212.0/24</code>"
 )
 RATE_LIMITED = "Слишком часто. Подожди немного и повтори."
 
@@ -80,6 +86,14 @@ def asn_suffix(asn) -> str:
 
 
 def watch_added(ip, port, prefix, asn, tcp, seeing, total) -> str:
+    if tcp is None:  # BGP-only (подсеть)
+        return (
+            f"✅ Слежу за подсетью <b>{esc(prefix)}</b>{asn_suffix(asn)}\n"
+            f"<i>режим BGP-only — TCP не проверяется</i>\n\n"
+            f"Текущий статус:\n"
+            f"{bgp_line(seeing, total)}\n\n"
+            f"Сообщу при изменении видимости."
+        )
     return (
         f"✅ Слежу за <b>{esc(ip)}</b> (порт {esc(port)})\n"
         f"<code>{esc(prefix)}</code>{asn_suffix(asn)}\n\n"
@@ -91,6 +105,12 @@ def watch_added(ip, port, prefix, asn, tcp, seeing, total) -> str:
 
 
 def status_msg(ip, port, prefix, asn, tcp, seeing, total) -> str:
+    if tcp is None:  # BGP-only
+        return (
+            f"📊 Подсеть <b>{esc(prefix)}</b>{asn_suffix(asn)}\n"
+            f"<i>BGP-only</i>\n\n"
+            f"{bgp_line(seeing, total)}"
+        )
     return (
         f"📊 <b>{esc(ip)}</b> (порт {esc(port)})\n"
         f"<code>{esc(prefix)}</code>{asn_suffix(asn)}\n\n"
@@ -101,15 +121,19 @@ def status_msg(ip, port, prefix, asn, tcp, seeing, total) -> str:
 
 def list_row(w, st) -> str:
     """w: watch row, st: state row|None."""
-    ipp = f"{esc(w['ip'])}:{esc(w['port'])}"
+    bgp_only = w["port"] == 0
+    label = esc(w["prefix"]) if bgp_only else f"{esc(w['ip'])}:{esc(w['port'])}"
     if st is None:
-        return f"• <b>{ipp}</b> — ещё не проверен"
+        return f"• <b>{label}</b> — ещё не проверен"
+    bgp_em = bgp_line(st["bgp_seeing"], st["bgp_total"]).split(" ", 1)[0]
+    short = _short_bgp(st["bgp_seeing"], st["bgp_total"])
+    if bgp_only:
+        return f"• <b>{label}</b>  {bgp_em}BGP {short}"
     tcp = st["tcp"] or "closed"
     return (
-        f"• <b>{ipp}</b>  "
+        f"• <b>{label}</b>  "
         f"{tcp_emoji(tcp)}TCP  "
-        f"{bgp_line(st['bgp_seeing'], st['bgp_total']).split(' ', 1)[0]}BGP "
-        f"{_short_bgp(st['bgp_seeing'], st['bgp_total'])}"
+        f"{bgp_em}BGP {short}"
     )
 
 
@@ -120,14 +144,16 @@ def _short_bgp(seeing, total) -> str:
 
 
 def event_msg(ip, port, prefix, asn, tcp, seeing, total, events) -> str:
+    bgp_only = tcp is None
     improved = any(e["to"] in ("open", "up") for e in events)
     degraded = any(e["to"] in ("closed", "down") for e in events)
+    label = esc(prefix) if bgp_only else esc(ip)
     if degraded and not improved:
-        head = f"🔴 <b>{esc(ip)}</b> — упал"
+        head = f"🔴 <b>{label}</b> — упал"
     elif improved and not degraded:
-        head = f"🟢 <b>{esc(ip)}</b> — вернулся"
+        head = f"🟢 <b>{label}</b> — вернулся"
     else:
-        head = f"🟡 <b>{esc(ip)}</b> — изменение статуса"
+        head = f"🟡 <b>{label}</b> — изменение статуса"
 
     changes = []
     for e in events:
@@ -136,10 +162,13 @@ def event_msg(ip, port, prefix, asn, tcp, seeing, total, events) -> str:
         else:
             changes.append(f"BGP {e['from']} → {e['to']}")
 
-    return (
-        f"{head}\n"
-        f"<code>{esc(prefix)}</code>{asn_suffix(asn)}\n\n"
-        f"{tcp_line(tcp, port)}\n"
-        f"{bgp_line(seeing, total)}\n\n"
-        f"<i>{esc(', '.join(changes))}</i>"
-    )
+    lines = [head]
+    if not bgp_only:
+        lines.append(f"<code>{esc(prefix)}</code>{asn_suffix(asn)}")
+    lines.append("")
+    if not bgp_only:
+        lines.append(tcp_line(tcp, port))
+    lines.append(bgp_line(seeing, total))
+    lines.append("")
+    lines.append(f"<i>{esc(', '.join(changes))}</i>")
+    return "\n".join(lines)
