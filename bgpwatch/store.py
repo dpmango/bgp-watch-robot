@@ -87,6 +87,23 @@ class Store:
             "SELECT * FROM state WHERE ip=? AND port=?", (ip, port)
         ).fetchone()
 
+    def ensure_state(self, ip, port, prefix, asn, tcp, seeing, total, now):
+        """Засеять state только если строки (ip,port) ещё нет.
+
+        Канонический baseline ведёт исключительно monitor-цикл (upsert_state).
+        Интерактивный /watch не должен перезаписывать существующую строку: иначе
+        чужая подписка на ту же (ip,port) могла бы сдвинуть baseline мимо реального
+        перехода up/down и заглушить алерт другим подписчикам (cross-tenant).
+        INSERT OR IGNORE — no-op при конфликте PRIMARY KEY (ip,port).
+        """
+        self.conn.execute(
+            "INSERT OR IGNORE INTO state"
+            "(ip,port,prefix,asn,tcp,bgp_seeing,bgp_total,last_change,last_check) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (ip, port, prefix, asn, tcp, seeing, total, now, now),
+        )
+        self.conn.commit()
+
     def upsert_state(self, ip, port, prefix, asn, tcp, seeing, total, changed, now):
         existing = self.get_state(ip, port)
         if changed or existing is None:

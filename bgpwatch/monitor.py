@@ -13,6 +13,27 @@ def classify_bgp(vis) -> str:
     return "up" if vis.ratio >= config.BGP_UP_THRESHOLD else "down"
 
 
+def classify_watch(w, st) -> str:
+    """Сводный статус подписки: 'up' | 'down' | 'unknown'.
+
+    BGP-only (port=0) — по BGP. Хост — down если TCP closed ИЛИ BGP down.
+    """
+    if st is None:
+        return "unknown"
+    bgp = None
+    if st["bgp_total"]:
+        ratio = (st["bgp_seeing"] or 0) / st["bgp_total"]
+        bgp = "up" if ratio >= config.BGP_UP_THRESHOLD else "down"
+    if w["port"] == 0:  # BGP-only подписка
+        return bgp or "unknown"
+    tcp = st["tcp"]
+    if tcp == "closed" or bgp == "down":
+        return "down"
+    if tcp == "open":
+        return "up"
+    return "unknown"
+
+
 def _old_bgp_class(old) -> str:
     """Классификация BGP из сохранённого state."""
     if old is None or not old["bgp_total"]:

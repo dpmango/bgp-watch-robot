@@ -6,6 +6,16 @@ def esc(v) -> str:
     """HTML-экранирование любого подставляемого значения (defence-in-depth)."""
     return html.escape(str(v), quote=False)
 
+
+def code(v) -> str:
+    """Значение в <code> — Telegram не превращает IP/подсети в ссылки."""
+    return f"<code>{esc(v)}</code>"
+
+
+def bcode(v) -> str:
+    """Жирный моноширинный — заметно и без авто-ссылки."""
+    return f"<b><code>{esc(v)}</code></b>"
+
 WELCOME = (
     "👋 Привет! Я <b>BGP Watch</b> — слежу, чтобы твои серверы были на связи.\n\n"
     "Даёшь мне IP — я каждые <b>15 минут</b> проверяю его двумя независимыми "
@@ -21,7 +31,8 @@ WELCOME = (
     "/watch <code>&lt;ip&gt; [порт]</code> — следить за хостом (порт по умолчанию 22)\n"
     "/watch <code>&lt;ip&gt;/24</code> — следить за подсетью (только BGP, без TCP)\n"
     "/unwatch <code>&lt;ip|подсеть&gt;</code> — перестать следить\n"
-    "/list — мои серверы и их статус\n"
+    "/list — сводка + только лежащие\n"
+    "/listfull — полный список всех подписок\n"
     "/status <code>&lt;ip|подсеть&gt;</code> — проверить прямо сейчас\n"
     "/help — справка"
 )
@@ -33,7 +44,8 @@ HELP = (
     "/watch <code>&lt;подсеть&gt;</code> — следить за диапазоном (только BGP).\n"
     "   Пример: <code>/watch 185.157.212.0/24</code>\n"
     "/unwatch <code>&lt;ip|подсеть&gt;</code> — снять с наблюдения.\n"
-    "/list — список с последним статусом.\n"
+    "/list — сводка (up/down) + только лежащие.\n"
+    "/listfull — полный список всех подписок.\n"
     "/status <code>&lt;ip|подсеть&gt;</code> — разовая проверка прямо сейчас.\n"
     "/help — эта справка.\n\n"
     "<b>Статусы:</b>\n"
@@ -88,15 +100,15 @@ def asn_suffix(asn) -> str:
 def watch_added(ip, port, prefix, asn, tcp, seeing, total) -> str:
     if tcp is None:  # BGP-only (подсеть)
         return (
-            f"✅ Слежу за подсетью <b>{esc(prefix)}</b>{asn_suffix(asn)}\n"
+            f"✅ Слежу за подсетью {bcode(prefix)}{asn_suffix(asn)}\n"
             f"<i>режим BGP-only — TCP не проверяется</i>\n\n"
             f"Текущий статус:\n"
             f"{bgp_line(seeing, total)}\n\n"
             f"Сообщу при изменении видимости."
         )
     return (
-        f"✅ Слежу за <b>{esc(ip)}</b> (порт {esc(port)})\n"
-        f"<code>{esc(prefix)}</code>{asn_suffix(asn)}\n\n"
+        f"✅ Слежу за {bcode(ip)} (порт {esc(port)})\n"
+        f"{code(prefix)}{asn_suffix(asn)}\n\n"
         f"Текущий статус:\n"
         f"{tcp_line(tcp, port)}\n"
         f"{bgp_line(seeing, total)}\n\n"
@@ -107,31 +119,54 @@ def watch_added(ip, port, prefix, asn, tcp, seeing, total) -> str:
 def status_msg(ip, port, prefix, asn, tcp, seeing, total) -> str:
     if tcp is None:  # BGP-only
         return (
-            f"📊 Подсеть <b>{esc(prefix)}</b>{asn_suffix(asn)}\n"
+            f"📊 Подсеть {bcode(prefix)}{asn_suffix(asn)}\n"
             f"<i>BGP-only</i>\n\n"
             f"{bgp_line(seeing, total)}"
         )
     return (
-        f"📊 <b>{esc(ip)}</b> (порт {esc(port)})\n"
-        f"<code>{esc(prefix)}</code>{asn_suffix(asn)}\n\n"
+        f"📊 {bcode(ip)} (порт {esc(port)})\n"
+        f"{code(prefix)}{asn_suffix(asn)}\n\n"
         f"{tcp_line(tcp, port)}\n"
         f"{bgp_line(seeing, total)}"
     )
 
 
+def list_header(total, up, down, unknown) -> str:
+    line = f"🟢 up {up} · 🔴 down {down}"
+    if unknown:
+        line += f" · ⚪ ? {unknown}"
+    return f"<b>Мои подписки: {total}</b>\n{line}"
+
+
+def list_all_ok(total) -> str:
+    return f"<b>Мои подписки: {total}</b>\n🟢 Все на связи — лежащих нет."
+
+
+def list_problems_caption(shown) -> str:
+    return f"\n<i>Показаны только лежащие ({shown}). Полный список — /listfull</i>"
+
+
+def list_full_caption() -> str:
+    return "\n<i>Все подписки:</i>"
+
+
+def list_more(n) -> str:
+    return f"<i>…и ещё {n} лежащих (полное число — в сводке выше).</i>"
+
+
 def list_row(w, st) -> str:
     """w: watch row, st: state row|None."""
     bgp_only = w["port"] == 0
-    label = esc(w["prefix"]) if bgp_only else f"{esc(w['ip'])}:{esc(w['port'])}"
+    label = code(w["prefix"]) if bgp_only else code(f"{w['ip']}:{w['port']}")
     if st is None:
-        return f"• <b>{label}</b> — ещё не проверен"
+        return f"• {label} — ещё не проверен"
     bgp_em = bgp_line(st["bgp_seeing"], st["bgp_total"]).split(" ", 1)[0]
     short = _short_bgp(st["bgp_seeing"], st["bgp_total"])
     if bgp_only:
-        return f"• <b>{label}</b>  {bgp_em}BGP {short}"
+        return f"• {label}  {bgp_em}BGP {short}"
     tcp = st["tcp"] or "closed"
     return (
-        f"• <b>{label}</b>  "
+        f"• {label}  "
         f"{tcp_emoji(tcp)}TCP  "
         f"{bgp_em}BGP {short}"
     )
@@ -147,13 +182,13 @@ def event_msg(ip, port, prefix, asn, tcp, seeing, total, events) -> str:
     bgp_only = tcp is None
     improved = any(e["to"] in ("open", "up") for e in events)
     degraded = any(e["to"] in ("closed", "down") for e in events)
-    label = esc(prefix) if bgp_only else esc(ip)
+    label = bcode(prefix if bgp_only else ip)
     if degraded and not improved:
-        head = f"🔴 <b>{label}</b> — упал"
+        head = f"🔴 {label} — упал"
     elif improved and not degraded:
-        head = f"🟢 <b>{label}</b> — вернулся"
+        head = f"🟢 {label} — вернулся"
     else:
-        head = f"🟡 <b>{label}</b> — изменение статуса"
+        head = f"🟡 {label} — изменение статуса"
 
     changes = []
     for e in events:
@@ -164,7 +199,7 @@ def event_msg(ip, port, prefix, asn, tcp, seeing, total, events) -> str:
 
     lines = [head]
     if not bgp_only:
-        lines.append(f"<code>{esc(prefix)}</code>{asn_suffix(asn)}")
+        lines.append(f"{code(prefix)}{asn_suffix(asn)}")
     lines.append("")
     if not bgp_only:
         lines.append(tcp_line(tcp, port))

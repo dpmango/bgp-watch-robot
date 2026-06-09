@@ -71,6 +71,9 @@ RIPE_RETRIES = _int("RIPE_RETRIES", 3)              # ретраи при http=0
 # Параллельность BGP-запросов за цикл (RIPEstat допускает до 8 одновременных).
 BGP_CONCURRENCY = _int("BGP_CONCURRENCY", 5)
 
+# Сколько лежащих подписок показывать в /list (остальные сворачиваются в "…ещё N").
+LIST_MAX_ROWS = _int("LIST_MAX_ROWS", 50)
+
 # --- лимиты (защита от DoS/abuse публичного бота) ---
 MAX_WATCHES_PER_CHAT = _int("MAX_WATCHES_PER_CHAT", 50)  # макс. подписок на чат
 RATE_LIMIT_CMDS = _int("RATE_LIMIT_CMDS", 20)            # команд за окно на чат

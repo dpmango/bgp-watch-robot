@@ -16,7 +16,8 @@ COMMANDS = [
     {"command": "start", "description": "Запуск и приветствие"},
     {"command": "watch", "description": "Следить: /watch 1.2.3.4 [порт] или /watch 1.2.3.0/24"},
     {"command": "unwatch", "description": "Перестать следить: /unwatch 1.2.3.4"},
-    {"command": "list", "description": "Мои IP под наблюдением"},
+    {"command": "list", "description": "Сводка + только лежащие"},
+    {"command": "listfull", "description": "Полный список всех подписок"},
     {"command": "status", "description": "Проверить IP сейчас: /status 1.2.3.4"},
     {"command": "help", "description": "Справка по командам"},
 ]
@@ -157,6 +158,8 @@ class Bot:
                 await self._unwatch(chat_id, args)
             elif cmd == "/list":
                 await self._list(chat_id)
+            elif cmd in ("/listfull", "/list_full"):
+                await self._list(chat_id, full=True)
             elif cmd == "/status":
                 await self._status(chat_id, args)
             else:
@@ -207,9 +210,10 @@ class Bot:
         vis = await bgp.prefix_visibility(self.http, prefix)
         seeing = vis.seeing if vis else None
         total = vis.total if vis else None
-        # базовый state, чтобы monitor не выстрелил повторно
-        self.store.upsert_state(
-            ip, port, prefix, asn, tcp, seeing, total, True, int(time.time())
+        # базовый state — только если строки ещё нет (monitor ведёт baseline сам);
+        # перезапись чужого baseline = глушение алертов другим подписчикам.
+        self.store.ensure_state(
+            ip, port, prefix, asn, tcp, seeing, total, int(time.time())
         )
         await self.tg.send_message(
             chat_id, texts.watch_added(ip, port, prefix, asn, tcp, seeing, total)
@@ -231,8 +235,8 @@ class Bot:
         vis = await bgp.prefix_visibility(self.http, cidr)
         seeing = vis.seeing if vis else None
         total = vis.total if vis else None
-        self.store.upsert_state(
-            base, 0, cidr, None, None, seeing, total, True, int(time.time())
+        self.store.ensure_state(
+            base, 0, cidr, None, None, seeing, total, int(time.time())
         )
         await self.tg.send_message(
             chat_id, texts.watch_added(base, 0, cidr, None, None, seeing, total)
@@ -254,28 +258,58 @@ class Bot:
         else:
             await self.tg.send_message(chat_id, texts.BAD_IP)
             return
-        target = texts.esc(arg)
+        target = texts.code(arg)
         n = self.store.remove_watch(chat_id, key)
         if n:
-            await self.tg.send_message(chat_id, f"🗑 Больше не слежу за <b>{target}</b>")
+            await self.tg.send_message(chat_id, f"🗑 Больше не слежу за {target}")
         else:
-            await self.tg.send_message(chat_id, f"<b>{target}</b> не был в списке.")
+            await self.tg.send_message(chat_id, f"{target} не был в списке.")
 
-    async def _list(self, chat_id):
+    async def _list(self, chat_id, full=False):
+        """full=False — сводка + только лежащие (с cap). full=True — все подписки."""
         rows = self.store.list_watches(chat_id)
         if not rows:
             await self.tg.send_message(chat_id, texts.EMPTY_LIST)
             return
-        header = f"<b>Мои IP под наблюдением ({len(rows)}):</b>"
-        chunk, size = [header], len(header)
+        up = down = unknown = 0
+        states = []   # (w, st) все
+        problems = []  # (w, st) только не-up
         for w in rows:
             st = self.store.get_state(w["ip"], w["port"])
+            states.append((w, st))
+            cls = monitor.classify_watch(w, st)
+            if cls == "up":
+                up += 1
+            else:
+                problems.append((w, st))
+                if cls == "down":
+                    down += 1
+                else:
+                    unknown += 1
+
+        header = texts.list_header(len(rows), up, down, unknown)
+        if full:
+            header += texts.list_full_caption()
+            to_show, truncated = states, 0
+        else:
+            if not problems:
+                await self.tg.send_message(chat_id, texts.list_all_ok(len(rows)))
+                return
+            header += texts.list_problems_caption(len(problems))
+            truncated = max(0, len(problems) - config.LIST_MAX_ROWS)
+            to_show = problems[: config.LIST_MAX_ROWS]
+
+        # пагинация: шапка в первом сообщении, дальше строки
+        chunk, size = [header], len(header)
+        for w, st in to_show:
             row = texts.list_row(w, st)
             if size + len(row) + 1 > 3500:  # лимит Telegram 4096
                 await self.tg.send_message(chat_id, "\n".join(chunk))
                 chunk, size = [], 0
             chunk.append(row)
             size += len(row) + 1
+        if truncated:
+            chunk.append(texts.list_more(truncated))
         if chunk:
             await self.tg.send_message(chat_id, "\n".join(chunk))
 
