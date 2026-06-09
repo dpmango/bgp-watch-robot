@@ -1,0 +1,9 @@
+.env
+telegram_ip.txt
+*.db
+*.db-wal
+*.db-shm
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

@@ -1,0 +1,47 @@
+[Unit]
+Description=BGP Watch Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bgpwatch
+Group=bgpwatch
+WorkingDirectory=/opt/bgpwatch
+ExecStart=/opt/bgpwatch/.venv/bin/python -m bgpwatch
+Restart=always
+RestartSec=5
+
+# --- hardening ---
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/bgpwatch
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+# AF_UNIX+AF_NETLINK нужны glibc-резолверу (systemd-resolved 127.0.0.53) — без них DNS ломается
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+MemoryMax=200M
+TasksMax=64
+# Доп. защита от SSRF на сетевом уровне (опц.): IPAddressDeny приватных диапазонов.
+# НЕ включено — ломает DNS через 127.0.0.53. SSRF закрыт фильтром public_ip() в коде.
+
+[Install]
+WantedBy=multi-user.target
