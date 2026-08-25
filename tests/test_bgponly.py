@@ -175,8 +175,8 @@ def test_watch_does_not_overwrite_monitor_baseline(tmp_path, monkeypatch):
     async def vis_up(client, prefix):
         return Visibility(326, 326)
 
-    async def probe_many(targets, conc, timeout):
-        return {(ip, 22): False}  # closed
+    async def probe_many(targets, conc, timeout, *a):
+        return {t: t in cfg.ANCHORS for t in targets}  # хост closed, якоря живы
 
     monkeypatch.setattr(monitor.bgp, "prefix_visibility", vis_up)
     monkeypatch.setattr(monitor.probe, "probe_many", probe_many)

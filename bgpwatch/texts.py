@@ -179,7 +179,9 @@ def _short_bgp(seeing, total) -> str:
 
 
 def event_msg(ip, port, prefix, asn, tcp, seeing, total, events) -> str:
-    bgp_only = tcp is None
+    # BGP-only определяется портом, а не tcp: у хоста tcp бывает None и когда
+    # проба не дала вердикта (сбой нашей сети), а подписка всё равно host'овая.
+    bgp_only = port == 0
     improved = any(e["to"] in ("open", "up") for e in events)
     degraded = any(e["to"] in ("closed", "down") for e in events)
     label = bcode(prefix if bgp_only else ip)
@@ -201,7 +203,7 @@ def event_msg(ip, port, prefix, asn, tcp, seeing, total, events) -> str:
     if not bgp_only:
         lines.append(f"{code(prefix)}{asn_suffix(asn)}")
     lines.append("")
-    if not bgp_only:
+    if not bgp_only and tcp is not None:
         lines.append(tcp_line(tcp, port))
     lines.append(bgp_line(seeing, total))
     lines.append("")

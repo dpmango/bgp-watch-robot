@@ -42,6 +42,18 @@ def _old_bgp_class(old) -> str:
     return "up" if ratio >= config.BGP_UP_THRESHOLD else "down"
 
 
+async def network_down(anchors, timeout: float) -> bool:
+    """True если недоступны ВСЕ контрольные хосты = легла сеть мониторинга.
+
+    Якоря стоят в независимых сетях, одновременный отказ всех означает проблему у
+    нас. Без такой проверки моргнувший аплинк выглядит как падение чужих хостов.
+    """
+    if not anchors:
+        return False
+    res = await probe.probe_many(list(anchors), len(anchors), timeout)
+    return not any(res.values())
+
+
 def compute_events(old, new_tcp: str, new_bgp: str):
     """Сравнить прошлый state с новым чтением. -> список событий.
 
@@ -76,11 +88,31 @@ async def run_cycle(store, http_client, notify):
     probe_targets = [(t["ip"], t["port"]) for t in targets if t["port"] != 0]
     probes = (
         await probe.probe_many(
-            probe_targets, config.PROBE_CONCURRENCY, config.PROBE_TIMEOUT
+            probe_targets,
+            config.PROBE_CONCURRENCY,
+            config.PROBE_TIMEOUT,
+            config.PROBE_ATTEMPTS,
+            config.PROBE_RETRY_DELAY,
         )
         if probe_targets
         else {}
     )
+
+    # Прошлый статус нужен и для гейта ниже, и для diff'а — читаем один раз.
+    olds = {(t["ip"], t["port"]): store.get_state(t["ip"], t["port"]) for t in targets}
+
+    # Есть провалы — сверяемся с контрольными хостами. Легла наша сеть, а не чужие
+    # хосты: TCP в этом цикле = "нет данных" (как unknown у BGP), держим прошлый
+    # статус и не алертим. Проверка самозавершающаяся: как только связь есть,
+    # вердикты возобновляются и реальное падение доедет до подписчика.
+    blackout = False
+    if not all(probes.values()):
+        blackout = await network_down(config.ANCHORS, config.PROBE_TIMEOUT)
+        if blackout:
+            logging.getLogger("bgpwatch").warning(
+                "контрольные хосты недоступны — сеть мониторинга легла, "
+                "TCP-события этого цикла подавлены"
+            )
 
     # 2) BGP по уникальным префиксам, параллельно (семафор BGP_CONCURRENCY).
     #    Потолок на цикл — защита от DoS/исчерпания бюджета RIPEstat.
@@ -105,12 +137,19 @@ async def run_cycle(store, http_client, notify):
 
     for t in targets:
         ip, port, pfx, asn = t["ip"], t["port"], t["prefix"], t["asn"]
-        tcp = None if port == 0 else ("open" if probes.get((ip, port)) else "closed")
+        if port == 0 or blackout:
+            tcp = None  # BGP-only подписка либо сбой нашей сети — вердикта нет
+        else:
+            tcp = "open" if probes.get((ip, port)) else "closed"
         vis = vis_map.get(pfx)
         new_bgp = classify_bgp(vis)
 
-        old = store.get_state(ip, port)
+        old = olds[(ip, port)]
         events = compute_events(old, tcp, new_bgp)
+
+        # tcp=None при blackout не должен затирать прошлый статус: иначе следующий
+        # цикл увидит old_tcp=None и промолчит уже про реальный переход.
+        stored_tcp = tcp if tcp is not None else (old["tcp"] if old is not None else None)
 
         # seeing/total: при unknown переносим старое значение
         if vis is not None:
@@ -121,12 +160,14 @@ async def run_cycle(store, http_client, notify):
             seeing, total = None, None
 
         store.upsert_state(
-            ip, port, pfx, asn, tcp, seeing, total, bool(events), now
+            ip, port, pfx, asn, stored_tcp, seeing, total, bool(events), now
         )
 
         if events:
             total_events += len(events)
             for chat_id in store.chats_for(ip, port):
-                await notify(chat_id, ip, port, pfx, asn, tcp, seeing, total, events)
+                await notify(
+                    chat_id, ip, port, pfx, asn, stored_tcp, seeing, total, events
+                )
 
     return total_events

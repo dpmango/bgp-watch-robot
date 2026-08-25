@@ -1,6 +1,6 @@
 # BGP Watch — Telegram-бот мониторинга доступности серверов
 
-Создано: 2026-06-09 · Обновлено: 2026-06-10 · Бот: **@BGPWatchRobot**
+Создано: 2026-06-09 · Обновлено: 2026-08-25 · Бот: **@BGPWatchRobot**
 Деплой: `root@v3116877.hosted-by-vdsina.ru` (`/opt/bgpwatch`, systemd)
 
 ## Цель
@@ -51,9 +51,22 @@ null-route'нутый `149.154.166.110`; реально проходит `149.15
 
 ## Анти-флаппинг
 
-Сбой фетча RIPEstat (`http=000`/timeout/429) = «нет данных» (unknown). Держим
-прошлый BGP-статус, **не алертим**. Лечится 3 ретраями. Алерт только на
+**BGP.** Сбой фетча RIPEstat (`http=000`/timeout/429) = «нет данных» (unknown).
+Держим прошлый BGP-статус, **не алертим**. Лечится 3 ретраями. Алерт только на
 подтверждённый переход состояния. Первый замер подписки = тихий baseline.
+
+**TCP.** Одна проба вердикта не даёт: провалившиеся цели перепроверяются
+(`PROBE_ATTEMPTS=3` с паузой `PROBE_RETRY_DELAY=5`с), успешные — нет, поэтому в
+норме ретрай ничего не стоит. Если провалы остались, цикл сверяется с
+**контрольными хостами** (`config.ANCHORS` — Cloudflare/Quad9/Yandex/OpenDNS,
+проверяются только при наличии провалов). Недоступны все сразу → легла наша сеть,
+а не наблюдаемые хосты: TCP в этом цикле = «нет данных», прошлый статус
+сохраняется, событий нет. Проверка самозавершающаяся — как только связь
+восстановлена, якоря отвечают и реальное падение доезжает до подписчика.
+
+Зачем: наблюдение идёт с одной точки (RU-хостинг), и моргнувший аплинк без этой
+защиты выглядел как синхронное падение чужих хостов — 12 серверов в 12 разных
+префиксах «упали» и «вернулись» одним циклом.
 
 ## Модули (изолированные)
 
@@ -61,9 +74,9 @@ null-route'нутый `149.154.166.110`; реально проходит `149.15
 |---|---|---|
 | `config.py` | чтение `.env` / env | — |
 | `bgp.py` | RIPEstat: `ip_to_prefix`, `prefix_visibility`, парсеры (чистые) | httpx |
-| `probe.py` | async TCP-проба, `probe_many` с лимитом конкурентности | asyncio |
+| `probe.py` | async TCP-проба, `probe_many` с лимитом конкурентности и ретраем провалов | asyncio |
 | `store.py` | SQLite: `watches` + `state`, CRUD | sqlite3 |
-| `monitor.py` | `compute_events` (чистая), `run_cycle` (проба+BGP+diff+нотификация) | bgp, probe, store |
+| `monitor.py` | `compute_events` (чистая), `network_down` (якоря), `run_cycle` (проба+BGP+diff+нотификация) | bgp, probe, store |
 | `texts.py` | русские тексты/форматирование (host и BGP-only) | — |
 | `telegram.py` | минимальный async-клиент Bot API + IP-пиннинг/самопоиск | httpx |
 | `bot.py` | разбор команд, rate-limit, polling-цикл, monitor-цикл | всё выше |
@@ -100,10 +113,11 @@ state(ip, port, prefix, asn, tcp, bgp_seeing, bgp_total, last_change, last_check
 2. TCP-пробы **параллельно** (semaphore `PROBE_CONCURRENCY`) — только для `port != 0`.
 3. BGP по уникальным префиксам **параллельно** (semaphore `BGP_CONCURRENCY`, ≤8 у
    RIPEstat). Потолок `MAX_PREFIXES_PER_CYCLE` на цикл (защита от DoS).
-4. Для каждого target: `tcp` (`None` если `port==0`), `bgp` (up/down/unknown).
-5. `compute_events(old, tcp, bgp)` → переходы. `tcp=None` и `unknown` событий не
-   дают; unknown переносит старые seeing/total.
-6. Сохранить state, отправить события всем подписчикам.
+4. При провалах — сверка с якорями; легла наша сеть → TCP всего цикла = «нет данных».
+5. Для каждого target: `tcp` (`None` если `port==0` или сбой нашей сети), `bgp`.
+6. `compute_events(old, tcp, bgp)` → переходы. `tcp=None` и `unknown` событий не
+   дают; unknown переносит старые seeing/total и прошлый TCP-статус.
+7. Сохранить state, отправить события всем подписчикам.
 
 ## Конфиг (`.env`, полный список — в `.env.example`)
 
@@ -112,6 +126,7 @@ BOT_TOKEN=...               # секрет, chmod 600, не в git
 POLL_INTERVAL=900           # период цикла, сек
 DEFAULT_PORT=22
 PROBE_TIMEOUT=4 / PROBE_CONCURRENCY=100
+PROBE_ATTEMPTS=3 / PROBE_RETRY_DELAY=5   # подтверждение провалившейся пробы
 BGP_UP_THRESHOLD=0.5 / BGP_CONCURRENCY=5
 RIPE_SOURCEAPP=bgpwatchrobot / RIPE_TIMEOUT=25 / RIPE_RETRIES=3
 MAX_WATCHES_PER_CHAT=50 / MAX_PREFIXES_PER_CYCLE=500
@@ -139,12 +154,14 @@ TELEGRAM_DISCOVER_RANGES=... / TELEGRAM_IP_STATE=...
   с запасом в 900с. RIPEstat: `P×96` запросов/день (`sourceapp` зарегистрирован).
 - Реальная нагрузка — доли процента CPU (≈1с CPU за ~2ч).
 
-## Тесты (`pytest`, 36)
+## Тесты (`pytest`, 45)
 
 - `bgp`: парсеры `parse_network_info`/`parse_routing_status`, `fallback_prefix`.
 - `monitor`: `compute_events` (все переходы, unknown, baseline, BGP-only),
-  `run_cycle` (host и BGP-only, пропуск пробы при `port=0`).
-- `probe`: `tcp_probe` против локального порта.
+  `run_cycle` (host и BGP-only, пропуск пробы при `port=0`), подавление массового
+  ложного алерта при отказе якорей и сохранение реального одиночного падения.
+- `probe`: `tcp_probe` против локального порта, ретрай провала, отсутствие
+  лишних проб при успехе.
 - `store`: CRUD, счётчики.
 - `security`: `public_ip`/`public_net` (SSRF-блок), rate-limit + GC, HTML-escape
   в `_unwatch`, лимит подписок, UNLIMITED bypass.

@@ -61,6 +61,11 @@ POLL_INTERVAL = _int("POLL_INTERVAL", 900)          # период монито�
 DEFAULT_PORT = _int("DEFAULT_PORT", 22)             # порт TCP-пробы по умолчанию
 PROBE_TIMEOUT = _float("PROBE_TIMEOUT", 4.0)        # таймаут одной пробы, сек
 PROBE_CONCURRENCY = _int("PROBE_CONCURRENCY", 100)  # макс. параллельных проб
+PROBE_ATTEMPTS = _int("PROBE_ATTEMPTS", 3)          # попыток перед вердиктом "закрыт"
+PROBE_RETRY_DELAY = _float("PROBE_RETRY_DELAY", 5.0)  # пауза между попытками, сек
+# Контрольные хосты в независимых сетях (Cloudflare/Quad9/Yandex/OpenDNS).
+# Недоступны все сразу = легла наша сеть, а не наблюдаемые хосты.
+ANCHORS = [("1.1.1.1", 443), ("9.9.9.9", 443), ("77.88.8.8", 443), ("208.67.222.222", 443)]
 
 BGP_UP_THRESHOLD = _float("BGP_UP_THRESHOLD", 0.5)  # доля пиров для статуса "up"
 
