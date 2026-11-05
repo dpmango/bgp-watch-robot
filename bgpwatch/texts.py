@@ -16,6 +16,10 @@ def bcode(v) -> str:
     """Жирный моноширинный — заметно и без авто-ссылки."""
     return f"<b><code>{esc(v)}</code></b>"
 
+
+def named_target(target, label=None) -> str:
+    return f"<b>{esc(label)}</b> · {target}" if label else target
+
 WELCOME = (
     "👋 Привет! Я <b>BGP Watch</b> — слежу, чтобы твои серверы были на связи.\n\n"
     "Даёшь мне IP — я каждые <b>15 минут</b> проверяю его двумя независимыми "
@@ -31,6 +35,7 @@ WELCOME = (
     "/watch <code>&lt;ip&gt; [порт]</code> — следить за хостом (порт по умолчанию 22)\n"
     "/watch <code>&lt;ip&gt;/24</code> — следить за подсетью (только BGP, без TCP)\n"
     "/unwatch <code>&lt;ip|подсеть&gt;</code> — перестать следить\n"
+    "/name <code>&lt;ip|подсеть&gt; &lt;название&gt;</code> — назвать подписку\n"
     "/list — сводка + только лежащие\n"
     "/listfull — полный список всех подписок\n"
     "/status <code>&lt;ip|подсеть&gt;</code> — проверить прямо сейчас\n"
@@ -44,6 +49,8 @@ HELP = (
     "/watch <code>&lt;подсеть&gt;</code> — следить за диапазоном (только BGP).\n"
     "   Пример: <code>/watch 185.157.212.0/24</code>\n"
     "/unwatch <code>&lt;ip|подсеть&gt;</code> — снять с наблюдения.\n"
+    "/name <code>&lt;ip|подсеть&gt; &lt;название&gt;</code> — своё название (до 64 символов).\n"
+    "   Вместо названия <code>-</code> — убрать имя; для IP меняются все его порты.\n"
     "/list — сводка (up/down) + только лежащие.\n"
     "/listfull — полный список всех подписок.\n"
     "/status <code>&lt;ip|подсеть&gt;</code> — разовая проверка прямо сейчас.\n"
@@ -67,6 +74,7 @@ BAD_CIDR = (
     "Нужна корректная публичная подсеть. Пример: <code>/watch 185.157.212.0/24</code>"
 )
 RATE_LIMITED = "Слишком часто. Подожди немного и повтори."
+BAD_NAME = "Укажи IP/подсеть и название до 64 символов: <code>/name 1.1.1.1 основной</code>"
 
 
 def limit_reached(limit) -> str:
@@ -97,17 +105,17 @@ def asn_suffix(asn) -> str:
     return f" · AS{esc(asn)}" if asn else ""
 
 
-def watch_added(ip, port, prefix, asn, tcp, seeing, total) -> str:
+def watch_added(ip, port, prefix, asn, tcp, seeing, total, label=None) -> str:
     if tcp is None:  # BGP-only (подсеть)
         return (
-            f"✅ Слежу за подсетью {bcode(prefix)}{asn_suffix(asn)}\n"
+            f"✅ Слежу за подсетью {named_target(bcode(prefix), label)}{asn_suffix(asn)}\n"
             f"<i>режим BGP-only — TCP не проверяется</i>\n\n"
             f"Текущий статус:\n"
             f"{bgp_line(seeing, total)}\n\n"
             f"Сообщу при изменении видимости."
         )
     return (
-        f"✅ Слежу за {bcode(ip)} (порт {esc(port)})\n"
+        f"✅ Слежу за {named_target(bcode(ip), label)} (порт {esc(port)})\n"
         f"{code(prefix)}{asn_suffix(asn)}\n\n"
         f"Текущий статус:\n"
         f"{tcp_line(tcp, port)}\n"
@@ -116,15 +124,15 @@ def watch_added(ip, port, prefix, asn, tcp, seeing, total) -> str:
     )
 
 
-def status_msg(ip, port, prefix, asn, tcp, seeing, total) -> str:
+def status_msg(ip, port, prefix, asn, tcp, seeing, total, label=None) -> str:
     if tcp is None:  # BGP-only
         return (
-            f"📊 Подсеть {bcode(prefix)}{asn_suffix(asn)}\n"
+            f"📊 Подсеть {named_target(bcode(prefix), label)}{asn_suffix(asn)}\n"
             f"<i>BGP-only</i>\n\n"
             f"{bgp_line(seeing, total)}"
         )
     return (
-        f"📊 {bcode(ip)} (порт {esc(port)})\n"
+        f"📊 {named_target(bcode(ip), label)} (порт {esc(port)})\n"
         f"{code(prefix)}{asn_suffix(asn)}\n\n"
         f"{tcp_line(tcp, port)}\n"
         f"{bgp_line(seeing, total)}"
@@ -158,6 +166,7 @@ def list_row(w, st) -> str:
     """w: watch row, st: state row|None."""
     bgp_only = w["port"] == 0
     label = code(w["prefix"]) if bgp_only else code(f"{w['ip']}:{w['port']}")
+    label = named_target(label, w["label"])
     if st is None:
         return f"• {label} — ещё не проверен"
     bgp_em = bgp_line(st["bgp_seeing"], st["bgp_total"]).split(" ", 1)[0]
@@ -178,13 +187,13 @@ def _short_bgp(seeing, total) -> str:
     return "—"
 
 
-def event_msg(ip, port, prefix, asn, tcp, seeing, total, events) -> str:
+def event_msg(ip, port, prefix, asn, tcp, seeing, total, events, label=None) -> str:
     # BGP-only определяется портом, а не tcp: у хоста tcp бывает None и когда
     # проба не дала вердикта (сбой нашей сети), а подписка всё равно host'овая.
     bgp_only = port == 0
     improved = any(e["to"] in ("open", "up") for e in events)
     degraded = any(e["to"] in ("closed", "down") for e in events)
-    label = bcode(prefix if bgp_only else ip)
+    label = named_target(bcode(prefix if bgp_only else ip), label)
     if degraded and not improved:
         head = f"🔴 {label} — упал"
     elif improved and not degraded:

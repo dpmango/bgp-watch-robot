@@ -199,3 +199,77 @@ def test_unlimited_bypass(tmp_path, monkeypatch):
     b.store.add_watch(555, "1.1.1.1", 22, "1.1.1.0/24", None)
     assert b._at_limit(555, "3.3.3.3", 22) is True
     b.store.close()
+
+
+def test_name_is_private_and_shown_in_list_status_and_alert(tmp_path, monkeypatch):
+    b = _make_bot(tmp_path, monkeypatch)
+    for cid in (111, 222):
+        b.store.add_watch(cid, "8.8.8.8", 22, "8.8.8.0/24", 15169)
+    b.store.upsert_state("8.8.8.8", 22, "8.8.8.0/24", 15169, "open", 10, 10, True, 100)
+    baseline = tuple(b.store.get_state("8.8.8.8", 22))
+    sent = []
+
+    async def send(chat_id, text, **kw):
+        sent.append((chat_id, text))
+
+    async def prefix(*a):
+        return "8.8.8.0/24", 15169
+
+    async def vis(*a):
+        return Visibility(10, 10)
+
+    async def probe(*a):
+        return True
+
+    monkeypatch.setattr(b.tg, "send_message", send)
+    monkeypatch.setattr(bot.bgp, "ip_to_prefix", prefix)
+    monkeypatch.setattr(bot.bgp, "prefix_visibility", vis)
+    from bgpwatch import probe as probe_mod
+    monkeypatch.setattr(probe_mod, "tcp_probe", probe)
+
+    async def scenario():
+        await b.handle({"chat": {"id": 111}, "text": "/name 8.8.8.8 <основной>"})
+        assert b.store.get_label(111, "8.8.8.8", 22) == "<основной>"
+        assert b.store.get_label(222, "8.8.8.8", 22) is None
+        assert tuple(b.store.get_state("8.8.8.8", 22)) == baseline
+        await b._watch(111, ["8.8.8.8"])
+        await b._list(111, full=True)
+        await b._status(111, ["8.8.8.8"])
+        events = [{"kind": "tcp", "from": "open", "to": "closed"}]
+        await b.notify(111, "8.8.8.8", 22, "8.8.8.0/24", 15169, "closed", 10, 10, events)
+        await b.notify(222, "8.8.8.8", 22, "8.8.8.0/24", 15169, "closed", 10, 10, events)
+        assert all("&lt;основной&gt;" in text and "<основной>" not in text for cid, text in sent if cid == 111)
+        assert "основной" not in sent[-1][1]
+        assert b.store.get_label(111, "8.8.8.8", 22) == "<основной>"
+        await b.close()
+
+    asyncio.run(scenario())
+
+
+def test_name_validation_cidr_and_clear(tmp_path, monkeypatch):
+    b = _make_bot(tmp_path, monkeypatch)
+    b.store.add_watch(111, "8.8.8.8", 22, "8.8.8.0/24", None)
+    b.store.add_watch(111, "8.8.8.8", 443, "8.8.8.0/24", None)
+    b.store.add_watch(111, "8.8.4.0", 0, "8.8.4.0/24", None)
+    sent = []
+
+    async def send(chat_id, text, **kw):
+        sent.append(text)
+
+    monkeypatch.setattr(b.tg, "send_message", send)
+
+    async def scenario():
+        for args in ([], ["8.8.8.8"], ["8.8.8.8", "x" * 65], ["invalid", "имя"]):
+            await b._name(111, args)
+            assert b.store.get_label(111, "8.8.8.8", 22) is None
+        await b._name(222, ["8.8.8.8", "чужой"])
+        assert "Сначала добавь" in sent[-1]
+        await b._name(111, ["8.8.8.8", "x" * 64])
+        assert all(r["label"] == "x" * 64 for r in b.store.list_watches(111) if r["port"])
+        await b._name(111, ["8.8.8.8", "-"])
+        assert all(r["label"] is None for r in b.store.list_watches(111) if r["port"])
+        await b._name(111, ["8.8.4.0/24", "резервная", "сеть"])
+        assert b.store.get_label(111, "8.8.4.0", 0) == "резервная сеть"
+        await b.close()
+
+    asyncio.run(scenario())

@@ -16,6 +16,7 @@ COMMANDS = [
     {"command": "start", "description": "Запуск и приветствие"},
     {"command": "watch", "description": "Следить: /watch 1.2.3.4 [порт] или /watch 1.2.3.0/24"},
     {"command": "unwatch", "description": "Перестать следить: /unwatch 1.2.3.4"},
+    {"command": "name", "description": "Название подписки: /name 1.2.3.4 основной"},
     {"command": "list", "description": "Сводка + только лежащие"},
     {"command": "listfull", "description": "Полный список всех подписок"},
     {"command": "status", "description": "Проверить IP сейчас: /status 1.2.3.4"},
@@ -131,7 +132,10 @@ class Bot:
     # --- нотификация из monitor ---
     async def notify(self, chat_id, ip, port, prefix, asn, tcp, seeing, total, events):
         await self.tg.send_message(
-            chat_id, texts.event_msg(ip, port, prefix, asn, tcp, seeing, total, events)
+            chat_id, texts.event_msg(
+                ip, port, prefix, asn, tcp, seeing, total, events,
+                self.store.get_label(chat_id, ip, port),
+            )
         )
 
     # --- команды ---
@@ -156,6 +160,8 @@ class Bot:
                 await self._watch(chat_id, args)
             elif cmd == "/unwatch":
                 await self._unwatch(chat_id, args)
+            elif cmd == "/name":
+                await self._name(chat_id, args)
             elif cmd == "/list":
                 await self._list(chat_id)
             elif cmd in ("/listfull", "/list_full"):
@@ -216,7 +222,10 @@ class Bot:
             ip, port, prefix, asn, tcp, seeing, total, int(time.time())
         )
         await self.tg.send_message(
-            chat_id, texts.watch_added(ip, port, prefix, asn, tcp, seeing, total)
+            chat_id, texts.watch_added(
+                ip, port, prefix, asn, tcp, seeing, total,
+                self.store.get_label(chat_id, ip, port),
+            )
         )
 
     async def _watch_cidr(self, chat_id, arg):
@@ -239,8 +248,34 @@ class Bot:
             base, 0, cidr, None, None, seeing, total, int(time.time())
         )
         await self.tg.send_message(
-            chat_id, texts.watch_added(base, 0, cidr, None, None, seeing, total)
+            chat_id, texts.watch_added(
+                base, 0, cidr, None, None, seeing, total,
+                self.store.get_label(chat_id, base, 0),
+            )
         )
+
+    async def _name(self, chat_id, args):
+        if len(args) < 2:
+            await self.tg.send_message(chat_id, texts.BAD_NAME)
+            return
+        if "/" in args[0]:
+            net = public_net(args[0])
+            ip = net[0] if net else None
+        else:
+            ip = public_ip(args[0])
+        if ip is None:
+            await self.tg.send_message(chat_id, texts.BAD_IP)
+            return
+        label = " ".join(args[1:])
+        if len(label) > 64:
+            await self.tg.send_message(chat_id, texts.BAD_NAME)
+            return
+        label = None if label == "-" else label
+        if not self.store.set_label(chat_id, ip, label):
+            await self.tg.send_message(chat_id, "Сначала добавь этот IP/подсеть через /watch.")
+            return
+        message = f"Название: <b>{texts.esc(label)}</b>" if label else "Название убрано"
+        await self.tg.send_message(chat_id, f"{message} · {texts.code(args[0])}")
 
     async def _unwatch(self, chat_id, args):
         if not args:
@@ -328,7 +363,10 @@ class Bot:
             seeing = vis.seeing if vis else None
             total = vis.total if vis else None
             await self.tg.send_message(
-                chat_id, texts.status_msg(base, 0, cidr, None, None, seeing, total)
+                chat_id, texts.status_msg(
+                    base, 0, cidr, None, None, seeing, total,
+                    self.store.get_label(chat_id, base, 0),
+                )
             )
             return
         if not valid_ip(args[0]):
@@ -351,7 +389,10 @@ class Bot:
         seeing = vis.seeing if vis else None
         total = vis.total if vis else None
         await self.tg.send_message(
-            chat_id, texts.status_msg(ip, port, prefix, asn, tcp, seeing, total)
+            chat_id, texts.status_msg(
+                ip, port, prefix, asn, tcp, seeing, total,
+                self.store.get_label(chat_id, ip, port),
+            )
         )
 
     # --- циклы ---

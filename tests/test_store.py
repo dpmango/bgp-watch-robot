@@ -54,3 +54,29 @@ def test_ensure_state_does_not_overwrite(tmp_path):
     st2 = db.get_state("9.9.9.9", 443)
     assert st2["tcp"] == "closed" and st2["last_change"] == 3000
     db.close()
+
+
+def test_labels_migrate_and_survive_rewatch(tmp_path):
+    import sqlite3
+
+    path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE watches(chat_id INTEGER,ip TEXT,port INTEGER,"
+        "prefix TEXT,asn INTEGER,added_at INTEGER,PRIMARY KEY(chat_id,ip,port))"
+    )
+    conn.execute("INSERT INTO watches VALUES(111,'8.8.8.8',22,'8.8.8.0/24',15169,123)")
+    conn.commit()
+    conn.close()
+
+    db = Store(path)
+    row = db.list_watches(111)[0]
+    assert row["added_at"] == 123 and row["label"] is None
+    db.set_label(111, "8.8.8.8", "основной")
+    db.add_watch(111, "8.8.8.8", 22, "8.8.0.0/16", 15169)
+    db.close()
+
+    db = Store(path)
+    row = db.list_watches(111)[0]
+    assert row["prefix"] == "8.8.0.0/16" and row["label"] == "основной"
+    db.close()

@@ -85,13 +85,17 @@ null-route'нутый `149.154.166.110`; реально проходит `149.15
 ## Данные (SQLite)
 
 ```sql
-watches(chat_id, ip, port, prefix, asn, added_at, PK(chat_id,ip,port))
+watches(chat_id, ip, port, prefix, asn, added_at, label, PK(chat_id,ip,port))
 state(ip, port, prefix, asn, tcp, bgp_seeing, bgp_total, last_change, last_check, PK(ip,port))
 ```
 
 - `port = 0` → BGP-only подписка (TCP не проверяется, `state.tcp = NULL`).
 - Мульти-юзер: несколько `chat_id` могут следить за одним `(ip,port)`. Пробы/BGP
   считаются один раз на уникальный target/prefix, нотификация — всем подписчикам.
+- `label` — личное имя подписки, экранируется в списке, статусе и уведомлениях.
+  `/name` меняет все текущие порты указанного IP только в своём чате; повторный
+  `/watch` сохраняет имя. Для старой БД `Store` добавляет nullable-колонку при запуске.
+  При откате кода колонку оставляют: прежние запросы с ней совместимы.
 
 ## Команды
 
@@ -102,6 +106,7 @@ state(ip, port, prefix, asn, tcp, bgp_seeing, bgp_total, last_change, last_check
 | `/watch <ip> [порт]` | следить за хостом (TCP+BGP), сразу показать статус |
 | `/watch <CIDR>` | следить за подсетью (только BGP) |
 | `/unwatch <ip\|CIDR>` | снять с наблюдения |
+| `/name <ip\|CIDR> <название>` | личное имя до 64 символов; `-` — убрать |
 | `/list` | мои подписки + последний статус (пагинация при >3500 симв.) |
 | `/status <ip\|CIDR>` | разовая проверка прямо сейчас (без сохранения) |
 
